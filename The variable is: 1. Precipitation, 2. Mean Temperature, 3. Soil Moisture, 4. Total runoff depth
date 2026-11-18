@@ -1,0 +1,1507 @@
+
+# =====================================================================
+# 1. IMPORT LIBRARIES
+# =====================================================================
+
+import re
+import shutil
+import warnings
+import unicodedata
+
+from pathlib import Path
+from itertools import combinations
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from scipy.stats import pearsonr
+from docx import Document
+from docx.shared import Pt
+
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+# =====================================================================
+# 2. USER SETTINGS
+# =====================================================================
+
+INPUT_FOLDER = Path(
+    r"D:\Deep neural Flood prediction\Data Management for Water Level\Data from 2000 to 2025\Full and Final Data"
+)
+
+OUTPUT_FOLDER = Path(
+    r"D:\Deep neural Flood prediction\Data Management for Water Level\Pearson Correlation\New Output"
+)
+
+START_DATE = "2000-01-01"
+END_DATE = "2026-01-01"
+
+EXPECTED_STATIONS = 22
+
+# Change to mm or cm if precipitation headings do not specify units.
+PRECIPITATION_UNIT_WITHOUT_LABEL = "m"
+
+SAVE_TIFF = True
+
+DPI = 600
+
+# Font settings for station summary heatmaps.
+# These are deliberately larger for publication and Word readability.
+WL_FIGSIZE = (10, 10)
+PAIRWISE_FIGSIZE = (12.5, 10)
+
+SUMMARY_Y_FONT = 16
+SUMMARY_X_FONT = 15
+
+WL_ANNOT_FONT = 14
+PAIRWISE_ANNOT_FONT = 13
+
+# Font settings for station-wise and pooled 5x5 heatmaps.
+GENERAL_ANNOT_FONT = 11
+GENERAL_TICK_FONT = 10
+
+
+# =====================================================================
+# 3. VARIABLE DEFINITIONS
+# =====================================================================
+
+VARIABLES = [
+    "Water Level (m)",
+    "Precipitation (m)",
+    "Mean Temperature (K)",
+    "Soil Moisture (m)",
+    "Runoff Depth (m)"
+]
+
+WATER_LEVEL_VARIABLE = "Water Level (m)"
+
+HYDRO_MET_VARIABLES = [
+    "Precipitation (m)",
+    "Mean Temperature (K)",
+    "Soil Moisture (m)",
+    "Runoff Depth (m)"
+]
+
+# Short labels for plotting.
+VARIABLE_SHORT = {
+    "Water Level (m)": "WL",
+    "Precipitation (m)": "P",
+    "Mean Temperature (K)": "MT",
+    "Soil Moisture (m)": "SM",
+    "Runoff Depth (m)": "RD"
+}
+
+PAIRWISE_VARIABLES = list(
+    combinations(VARIABLES, 2)
+)
+
+
+# =====================================================================
+# 4. CREATE OUTPUT FOLDERS
+# =====================================================================
+
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+HEATMAP_FOLDER = OUTPUT_FOLDER / "Station_Wise_Heatmaps"
+HEATMAP_FOLDER.mkdir(parents=True, exist_ok=True)
+
+POOLED_FOLDER = OUTPUT_FOLDER / "Pooled_Heatmaps"
+POOLED_FOLDER.mkdir(parents=True, exist_ok=True)
+
+SUMMARY_FOLDER = OUTPUT_FOLDER / "Summary_Heatmaps"
+SUMMARY_FOLDER.mkdir(parents=True, exist_ok=True)
+
+EXCEL_OUTPUT = OUTPUT_FOLDER / "Pearson_Correlation_Results.xlsx"
+
+WORD_OUTPUT = OUTPUT_FOLDER / "Complete_Pearson_Correlation_Code.docx"
+
+SCRIPT_OUTPUT = OUTPUT_FOLDER / "Pearson_Correlation_Analysis.py"
+
+
+# =====================================================================
+# 5. CHECK INPUT DIRECTORY
+# =====================================================================
+
+if not INPUT_FOLDER.exists():
+    raise FileNotFoundError(
+        f"Input folder does not exist:\n{INPUT_FOLDER}"
+    )
+
+excel_files = sorted(
+    list(INPUT_FOLDER.glob("*.xlsx"))
+    + list(INPUT_FOLDER.glob("*.xlsm"))
+    + list(INPUT_FOLDER.glob("*.xls"))
+)
+
+excel_files = [
+    f for f in excel_files
+    if not f.name.startswith("~$")
+]
+
+if not excel_files:
+    raise FileNotFoundError(
+        f"No Excel files found in:\n{INPUT_FOLDER}"
+    )
+
+print("=" * 75)
+print("PEARSON CORRELATION ANALYSIS")
+print("=" * 75)
+
+print("Excel files found:", len(excel_files))
+
+
+# =====================================================================
+# 6. NORMALIZE EXCEL COLUMN NAMES
+# =====================================================================
+
+def normalize_column_name(name):
+
+    name = str(name)
+
+    name = unicodedata.normalize("NFKC", name)
+
+    name = name.replace("\ufeff", "")
+    name = name.replace("\u200b", "")
+
+    name = name.strip().lower()
+
+    name = re.sub(r"\.\d+$", "", name)
+
+    name = re.sub(r"[^a-z0-9]", "", name)
+
+    return name
+
+
+# =====================================================================
+# 7. COLUMN ALIASES
+# =====================================================================
+
+COLUMN_ALIASES = {
+
+    "Date": [
+        "date",
+        "datetime",
+        "time",
+        "observationdate",
+        "recorddate"
+    ],
+
+    "Water Level (m)": [
+        "waterlevel",
+        "waterlevelm",
+        "waterlevelmeter",
+        "waterlevelinm",
+        "wl",
+        "wlm",
+        "gaugelevel",
+        "stage",
+        "stagelevel"
+    ],
+
+    "Precipitation (m)": [
+        "precipitation",
+        "precipitationm",
+        "precipitationmm",
+        "precipitationcm",
+        "rainfall",
+        "rainfallm",
+        "rainfallmm",
+        "rainfallcm",
+        "precip",
+        "precipm",
+        "precipmm",
+        "rain",
+        "rainm",
+        "rainmm"
+    ],
+
+    "Mean Temperature (K)": [
+        "meantemperature",
+        "meantemperaturek",
+        "meantemperaturec",
+        "meantemp",
+        "meantempk",
+        "meantempc",
+        "temperature",
+        "temperaturek",
+        "temperaturec",
+        "temp",
+        "tempk",
+        "tempc",
+        "tmean"
+    ],
+
+    "Soil Moisture (m)": [
+        "soilmoisture",
+        "soilmoisturem",
+        "soilmoisturemm",
+        "soilmoisturecm",
+        "soilwatercontent",
+        "soilwater",
+        "swvl",
+        "swvl1"
+    ],
+
+    "Runoff Depth (m)": [
+        "runoff",
+        "runoffdepth",
+        "runoffdepthm",
+        "runoffm",
+        "runoffmm",
+        "surfrunoff",
+        "surface runoff",
+        "ro"
+    ]
+}
+
+
+# =====================================================================
+# 8. IDENTIFY EXCEL COLUMNS
+# =====================================================================
+
+def find_column(df, canonical_name, file_name):
+
+    aliases = COLUMN_ALIASES[canonical_name]
+
+    normalized_aliases = {
+        normalize_column_name(x) for x in aliases
+    }
+
+    matches = []
+
+    for col in df.columns:
+
+        normalized = normalize_column_name(col)
+
+        if normalized in normalized_aliases:
+            matches.append(col)
+
+    if not matches:
+
+        for col in df.columns:
+
+            normalized = normalize_column_name(col)
+
+            if canonical_name == "Date":
+
+                if normalized in ["date", "datetime", "time"]:
+                    matches.append(col)
+
+            elif canonical_name == "Water Level (m)":
+
+                if (
+                    "waterlevel" in normalized
+                    or normalized in ["wl", "wlm", "stage"]
+                ):
+                    matches.append(col)
+
+            elif canonical_name == "Precipitation (m)":
+
+                if (
+                    "precip" in normalized
+                    or "rainfall" in normalized
+                ):
+                    matches.append(col)
+
+            elif canonical_name == "Mean Temperature (K)":
+
+                if (
+                    "temperature" in normalized
+                    or "meantemp" in normalized
+                    or normalized == "temp"
+                ):
+                    matches.append(col)
+
+            elif canonical_name == "Soil Moisture (m)":
+
+                if (
+                    "soilmoisture" in normalized
+                    or "soilwatercontent" in normalized
+                ):
+                    matches.append(col)
+
+            elif canonical_name == "Runoff Depth (m)":
+
+                if "runoff" in normalized:
+                    matches.append(col)
+
+    matches = list(dict.fromkeys(matches))
+
+    if len(matches) == 0:
+
+        raise ValueError(
+            f"\nCannot identify column: {canonical_name}"
+            f"\nFile: {file_name}"
+            f"\nActual Excel columns: {df.columns.tolist()}"
+        )
+
+    if len(matches) > 1:
+
+        reference = df[matches[0]]
+
+        for other_col in matches[1:]:
+
+            if not reference.equals(df[other_col]):
+
+                raise ValueError(
+                    f"\nConflicting duplicate columns detected."
+                    f"\nFile: {file_name}"
+                    f"\nVariable: {canonical_name}"
+                    f"\nColumns: {matches}"
+                )
+
+        print(
+            f"Identical duplicate columns found for "
+            f"{canonical_name}: {matches}. "
+            f"Using {matches[0]}."
+        )
+
+    return matches[0]
+
+
+# =====================================================================
+# 9. DETECT PRECIPITATION UNIT
+# =====================================================================
+
+def detect_precipitation_unit(column_name):
+
+    normalized = normalize_column_name(column_name)
+
+    if "mm" in normalized:
+        return "mm"
+
+    if "cm" in normalized:
+        return "cm"
+
+    if normalized.endswith("m"):
+        return "m"
+
+    return PRECIPITATION_UNIT_WITHOUT_LABEL.lower()
+
+
+# =====================================================================
+# 10. EXTRACT SHORT STATION ID
+# =====================================================================
+
+def extract_station_id(station_name):
+
+    """
+    Examples:
+
+    1. SW_45.5_Chilmari complete
+       -> SW 45.5
+
+    SW_46.0
+       -> SW 46.0
+
+    5. SW_47.5_station
+       -> SW 47.5
+    """
+
+    # Find alphabetic station prefix followed by a number.
+    match = re.search(
+        r"([A-Za-z]{1,8})[_\s-]*(\d+(?:\.\d+)?)",
+        station_name
+    )
+
+    if match:
+
+        prefix = match.group(1).upper()
+
+        number = match.group(2)
+
+        return f"{prefix} {number}"
+
+    # Fallback: remove leading numbering and clean the name.
+    cleaned = re.sub(
+        r"^\s*\d+\s*[\.\-_]?\s*",
+        "",
+        station_name
+    )
+
+    cleaned = re.sub(
+        r"\bcomplete\b",
+        "",
+        cleaned,
+        flags=re.IGNORECASE
+    )
+
+    cleaned = cleaned.replace("_", " ").strip()
+
+    return cleaned
+
+
+# =====================================================================
+# 11. STANDARDIZE STATION DATA
+# =====================================================================
+
+def standardize_station_data(file_path):
+
+    print(f"\nReading: {file_path.name}")
+
+    df = pd.read_excel(file_path)
+
+    if df.empty:
+        raise ValueError(
+            f"Empty Excel file: {file_path.name}"
+        )
+
+    df = df.dropna(axis=1, how="all")
+
+    column_mapping = {}
+
+    for canonical in ["Date"] + VARIABLES:
+
+        actual_column = find_column(
+            df,
+            canonical,
+            file_path.name
+        )
+
+        column_mapping[canonical] = actual_column
+
+    selected = pd.DataFrame()
+
+    for canonical, actual in column_mapping.items():
+
+        selected[canonical] = df[actual].copy()
+
+    selected["Date"] = pd.to_datetime(
+        selected["Date"],
+        errors="coerce"
+    )
+
+    selected = selected.dropna(
+        subset=["Date"]
+    )
+
+    selected = selected[
+        (selected["Date"] >= pd.Timestamp(START_DATE))
+        &
+        (selected["Date"] < pd.Timestamp(END_DATE))
+    ].copy()
+
+    for variable in VARIABLES:
+
+        selected[variable] = pd.to_numeric(
+            selected[variable],
+            errors="coerce"
+        )
+
+    # Precipitation unit conversion
+    original_precip_column = column_mapping[
+        "Precipitation (m)"
+    ]
+
+    precip_unit = detect_precipitation_unit(
+        original_precip_column
+    )
+
+    if precip_unit == "mm":
+
+        selected["Precipitation (m)"] /= 1000
+
+    elif precip_unit == "cm":
+
+        selected["Precipitation (m)"] /= 100
+
+    elif precip_unit != "m":
+
+        raise ValueError(
+            f"Unsupported precipitation unit: {precip_unit}"
+        )
+
+    selected[VARIABLES] = selected[VARIABLES].replace(
+        [np.inf, -np.inf],
+        np.nan
+    )
+
+    selected = selected.sort_values("Date")
+
+    duplicate_dates = selected["Date"].duplicated().sum()
+
+    if duplicate_dates > 0:
+
+        print(
+            f"WARNING: {duplicate_dates} duplicate dates "
+            f"found in {file_path.name}. Keeping first."
+        )
+
+        selected = selected.drop_duplicates(
+            subset="Date",
+            keep="first"
+        )
+
+    selected = selected.reset_index(drop=True)
+
+    station_name = file_path.stem
+
+    station_id = extract_station_id(station_name)
+
+    selected["Station"] = station_name
+
+    selected["Station_ID"] = station_id
+
+    mapping_record = {
+        "Station": station_name,
+        "Station_ID": station_id,
+        "File": file_path.name,
+        "Precipitation original heading": original_precip_column,
+        "Detected precipitation unit": precip_unit
+    }
+
+    for canonical, actual in column_mapping.items():
+
+        mapping_record[
+            f"Original heading: {canonical}"
+        ] = str(actual)
+
+    print("Station:", station_name)
+    print("Station ID:", station_id)
+    print("Valid observations:", len(selected))
+
+    return selected, mapping_record
+
+
+# =====================================================================
+# 12. LOAD ALL STATIONS
+# =====================================================================
+
+station_data = {}
+
+column_mapping_records = []
+
+for file_path in excel_files:
+
+    data, mapping_record = standardize_station_data(
+        file_path
+    )
+
+    station_name = file_path.stem
+
+    station_data[station_name] = data
+
+    column_mapping_records.append(
+        mapping_record
+    )
+
+
+if len(station_data) != EXPECTED_STATIONS:
+
+    print(
+        f"\nWARNING: Expected {EXPECTED_STATIONS} stations, "
+        f"but loaded {len(station_data)}."
+    )
+
+
+# =====================================================================
+# 13. CHECK STATION ID UNIQUENESS
+# =====================================================================
+
+station_id_lookup = {}
+
+for station_name, data in station_data.items():
+
+    station_id = data["Station_ID"].iloc[0]
+
+    if station_id in station_id_lookup:
+
+        raise ValueError(
+            f"Duplicate station ID detected: {station_id}\n"
+            f"Files: {station_id_lookup[station_id]} "
+            f"and {station_name}\n"
+            "Please check station ID extraction."
+        )
+
+    station_id_lookup[station_id] = station_name
+
+
+# =====================================================================
+# 14. SAFE PEARSON CORRELATION FUNCTION
+# =====================================================================
+
+def calculate_pearson_matrix(data, variables):
+
+    missing = [
+        v for v in variables
+        if v not in data.columns
+    ]
+
+    if missing:
+
+        raise ValueError(
+            f"Missing variables: {missing}"
+        )
+
+    if data.columns.duplicated().any():
+
+        duplicates = data.columns[
+            data.columns.duplicated()
+        ].tolist()
+
+        raise ValueError(
+            f"Duplicate columns: {duplicates}"
+        )
+
+    correlation_matrix = pd.DataFrame(
+        np.nan,
+        index=variables,
+        columns=variables,
+        dtype=float
+    )
+
+    pvalue_matrix = pd.DataFrame(
+        np.nan,
+        index=variables,
+        columns=variables,
+        dtype=float
+    )
+
+    sample_matrix = pd.DataFrame(
+        0,
+        index=variables,
+        columns=variables,
+        dtype=int
+    )
+
+    for var1 in variables:
+
+        for var2 in variables:
+
+            x = pd.to_numeric(
+                data[var1],
+                errors="coerce"
+            )
+
+            y = pd.to_numeric(
+                data[var2],
+                errors="coerce"
+            )
+
+            if isinstance(x, pd.DataFrame):
+                raise ValueError(
+                    f"{var1} returned multiple columns."
+                )
+
+            if isinstance(y, pd.DataFrame):
+                raise ValueError(
+                    f"{var2} returned multiple columns."
+                )
+
+            pair = pd.DataFrame({
+                "x": x,
+                "y": y
+            })
+
+            pair = pair.replace(
+                [np.inf, -np.inf],
+                np.nan
+            ).dropna()
+
+            n = int(len(pair))
+
+            sample_matrix.loc[var1, var2] = n
+
+            if n < 3:
+                continue
+
+            x_values = pair["x"].to_numpy(
+                dtype=np.float64
+            )
+
+            y_values = pair["y"].to_numpy(
+                dtype=np.float64
+            )
+
+            if (
+                np.std(x_values) == 0
+                or np.std(y_values) == 0
+            ):
+                continue
+
+            r, p = pearsonr(
+                x_values,
+                y_values
+            )
+
+            r = float(np.asarray(r).item())
+
+            p = float(np.asarray(p).item())
+
+            correlation_matrix.loc[var1, var2] = r
+
+            pvalue_matrix.loc[var1, var2] = p
+
+    return (
+        correlation_matrix,
+        pvalue_matrix,
+        sample_matrix
+    )
+
+
+# =====================================================================
+# 15. GENERAL HEATMAP FUNCTION
+# =====================================================================
+
+def save_general_heatmap(
+    matrix,
+    title,
+    output_name,
+    output_folder
+):
+
+    plt.figure(figsize=(11, 9))
+
+    ax = sns.heatmap(
+        matrix,
+        annot=True,
+        fmt=".2f",
+        cmap="RdBu_r",
+        vmin=-1,
+        vmax=1,
+        center=0,
+        square=True,
+        linewidths=0.5,
+        linecolor="white",
+        annot_kws={
+            "size": GENERAL_ANNOT_FONT
+        },
+        cbar_kws={
+            "label": "Pearson correlation coefficient (r)"
+        }
+    )
+
+    ax.set_title(
+        title,
+        fontsize=15,
+        fontweight="bold",
+        pad=15
+    )
+
+    ax.tick_params(
+        axis="x",
+        labelsize=GENERAL_TICK_FONT,
+        rotation=45
+    )
+
+    ax.tick_params(
+        axis="y",
+        labelsize=GENERAL_TICK_FONT,
+        rotation=0
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        output_folder / f"{output_name}.png",
+        dpi=DPI,
+        bbox_inches="tight"
+    )
+
+    if SAVE_TIFF:
+
+        plt.savefig(
+            output_folder / f"{output_name}.tiff",
+            dpi=DPI,
+            bbox_inches="tight"
+        )
+
+    plt.close()
+
+
+# =====================================================================
+# 16. PUBLICATION-STYLE SUMMARY HEATMAP FUNCTION
+# =====================================================================
+
+def save_summary_heatmap(
+    matrix,
+    output_name,
+    output_folder,
+    figure_size,
+    x_font,
+    y_font,
+    annotation_font,
+    x_rotation=0
+):
+
+    """
+    Publication-style heatmap:
+
+    - No plot title
+    - No x-axis heading
+    - No y-axis heading
+    - Station IDs only on y-axis
+    - Short variable labels on x-axis
+    - Large, readable annotations
+    """
+
+    fig, ax = plt.subplots(
+        figsize=figure_size
+    )
+
+    sns.heatmap(
+        matrix,
+        ax=ax,
+        annot=True,
+        fmt=".2f",
+        cmap="RdBu_r",
+        vmin=-1,
+        vmax=1,
+        center=0,
+        linewidths=0.6,
+        linecolor="white",
+        square=False,
+        annot_kws={
+            "size": annotation_font,
+            "weight": "medium"
+        },
+        cbar_kws={
+            "label": "Pearson correlation coefficient (r)",
+            "shrink": 0.85,
+            "pad": 0.03
+        }
+    )
+
+    # Remove plot heading
+    ax.set_title("")
+
+    # Remove axis headings
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+
+    # Short x-axis labels
+    ax.set_xticklabels(
+        matrix.columns,
+        rotation=x_rotation,
+        ha="center" if x_rotation == 0 else "right",
+        fontsize=x_font,
+        fontweight="medium"
+    )
+
+    # Station IDs only on y-axis
+    ax.set_yticklabels(
+        matrix.index,
+        rotation=0,
+        fontsize=y_font,
+        fontweight="medium"
+    )
+
+    ax.tick_params(
+        axis="both",
+        which="both",
+        length=0,
+        pad=7
+    )
+
+    # Colorbar font
+    colorbar = ax.collections[0].colorbar
+
+    colorbar.ax.tick_params(
+        labelsize=11
+    )
+
+    colorbar.set_label(
+        "Pearson correlation coefficient (r)",
+        fontsize=12
+    )
+
+    # No surrounding top/right borders
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout(
+        pad=1.2
+    )
+
+    # Save PNG
+    png_path = output_folder / f"{output_name}.png"
+
+    fig.savefig(
+        png_path,
+        dpi=DPI,
+        bbox_inches="tight",
+        facecolor="white"
+    )
+
+    # Save TIFF
+    if SAVE_TIFF:
+
+        tiff_path = output_folder / f"{output_name}.tiff"
+
+        fig.savefig(
+            tiff_path,
+            dpi=DPI,
+            bbox_inches="tight",
+            facecolor="white"
+        )
+
+    plt.close(fig)
+
+    print("Saved:", png_path)
+
+
+# =====================================================================
+# 17. STATION-WISE CORRELATION ANALYSIS
+# =====================================================================
+
+station_correlation_results = {}
+
+station_pvalue_results = {}
+
+station_sample_results = {}
+
+station_summary_records = []
+
+print("\nSTATION-WISE CORRELATION ANALYSIS")
+
+for station_name, data in station_data.items():
+
+    print("\nProcessing:", station_name)
+
+    r_matrix, p_matrix, n_matrix = calculate_pearson_matrix(
+        data,
+        VARIABLES
+    )
+
+    station_correlation_results[station_name] = r_matrix
+
+    station_pvalue_results[station_name] = p_matrix
+
+    station_sample_results[station_name] = n_matrix
+
+    # Station-wise 5x5 heatmap
+    save_general_heatmap(
+        matrix=r_matrix,
+        title=f"Pearson Correlation - {station_name}",
+        output_name=f"{station_name}_Pearson_Correlation",
+        output_folder=HEATMAP_FOLDER
+    )
+
+    station_id = data["Station_ID"].iloc[0]
+
+    for variable in HYDRO_MET_VARIABLES:
+
+        station_summary_records.append({
+
+            "Station": station_name,
+
+            "Station_ID": station_id,
+
+            "Variable": variable,
+
+            "Pearson_r": r_matrix.loc[
+                WATER_LEVEL_VARIABLE,
+                variable
+            ],
+
+            "P_value": p_matrix.loc[
+                WATER_LEVEL_VARIABLE,
+                variable
+            ],
+
+            "Sample_Size": n_matrix.loc[
+                WATER_LEVEL_VARIABLE,
+                variable
+            ]
+        })
+
+
+# =====================================================================
+# 18. WATER LEVEL CORRELATION: 22 x 4
+# =====================================================================
+
+station_summary = pd.DataFrame(
+    station_summary_records
+)
+
+# Use short x-axis labels
+WL_LABELS = [
+    "WL vs. P",
+    "WL vs. MT",
+    "WL vs. SM",
+    "WL vs. RD"
+]
+
+# Create the correlation matrix
+water_level_correlation = station_summary.pivot(
+    index="Station_ID",
+    columns="Variable",
+    values="Pearson_r"
+)
+
+water_level_correlation = water_level_correlation.reindex(
+    columns=HYDRO_MET_VARIABLES
+)
+
+# Rename horizontal labels
+water_level_correlation.columns = WL_LABELS
+
+# Sort station IDs naturally where possible
+water_level_correlation = water_level_correlation.sort_index()
+
+# Save publication-style heatmap
+save_summary_heatmap(
+    matrix=water_level_correlation,
+    output_name="22_Stations_Water_Level_Correlation",
+    output_folder=SUMMARY_FOLDER,
+    figure_size=WL_FIGSIZE,
+    x_font=SUMMARY_X_FONT,
+    y_font=SUMMARY_Y_FONT,
+    annotation_font=WL_ANNOT_FONT,
+    x_rotation=0
+)
+
+
+# =====================================================================
+# 19. WATER LEVEL P-VALUES AND SAMPLE SIZE
+# =====================================================================
+
+water_level_pvalues = station_summary.pivot(
+    index="Station_ID",
+    columns="Variable",
+    values="P_value"
+)
+
+water_level_pvalues = water_level_pvalues.reindex(
+    columns=HYDRO_MET_VARIABLES
+)
+
+water_level_pvalues.columns = WL_LABELS
+
+water_level_pvalues = water_level_pvalues.sort_index()
+
+
+water_level_samples = station_summary.pivot(
+    index="Station_ID",
+    columns="Variable",
+    values="Sample_Size"
+)
+
+water_level_samples = water_level_samples.reindex(
+    columns=HYDRO_MET_VARIABLES
+)
+
+water_level_samples.columns = WL_LABELS
+
+water_level_samples = water_level_samples.sort_index()
+
+
+# =====================================================================
+# 20. ALL 10 PAIRWISE CORRELATIONS: 22 x 10
+# =====================================================================
+
+pairwise_records = []
+
+PAIRWISE_LABELS = []
+
+for var1, var2 in PAIRWISE_VARIABLES:
+
+    label = (
+        f"{VARIABLE_SHORT[var1]} vs. "
+        f"{VARIABLE_SHORT[var2]}"
+    )
+
+    PAIRWISE_LABELS.append(label)
+
+
+for station_name, data in station_data.items():
+
+    station_id = data["Station_ID"].iloc[0]
+
+    r_matrix = station_correlation_results[station_name]
+
+    record = {
+        "Station_ID": station_id
+    }
+
+    for (var1, var2), pair_label in zip(
+        PAIRWISE_VARIABLES,
+        PAIRWISE_LABELS
+    ):
+
+        record[pair_label] = r_matrix.loc[
+            var1,
+            var2
+        ]
+
+    pairwise_records.append(record)
+
+
+pairwise_correlation = pd.DataFrame(
+    pairwise_records
+)
+
+pairwise_correlation = pairwise_correlation.set_index(
+    "Station_ID"
+)
+
+pairwise_correlation = pairwise_correlation.reindex(
+    columns=PAIRWISE_LABELS
+)
+
+pairwise_correlation = pairwise_correlation.sort_index()
+
+
+# Save publication-style pairwise heatmap
+save_summary_heatmap(
+    matrix=pairwise_correlation,
+    output_name="22_Stations_10_Pairwise_Correlations",
+    output_folder=SUMMARY_FOLDER,
+    figure_size=PAIRWISE_FIGSIZE,
+    x_font=SUMMARY_X_FONT,
+    y_font=SUMMARY_Y_FONT,
+    annotation_font=PAIRWISE_ANNOT_FONT,
+    x_rotation=45
+)
+
+
+# =====================================================================
+# 21. CREATE POOLED DATASET
+# =====================================================================
+
+print("\nCreating pooled dataset...")
+
+pooled_data = pd.concat(
+    list(station_data.values()),
+    ignore_index=True
+)
+
+print("Pooled dataset shape:", pooled_data.shape)
+
+print("Total station-day records:", len(pooled_data))
+
+
+# =====================================================================
+# 22. POOLED PEARSON CORRELATION
+# =====================================================================
+
+pooled_r, pooled_p, pooled_n = calculate_pearson_matrix(
+    pooled_data,
+    VARIABLES
+)
+
+
+save_general_heatmap(
+    matrix=pooled_r,
+    title="Pooled Pearson Correlation - All 22 Stations (2000-2025)",
+    output_name="Pooled_22_Stations_Pearson_Correlation",
+    output_folder=POOLED_FOLDER
+)
+
+
+# =====================================================================
+# 23. POOLED PAIRWISE SUMMARY
+# =====================================================================
+
+pooled_pairwise_records = []
+
+for var1, var2 in PAIRWISE_VARIABLES:
+
+    pooled_pairwise_records.append({
+
+        "Variable 1": var1,
+
+        "Variable 2": var2,
+
+        "Pearson_r": pooled_r.loc[var1, var2],
+
+        "P_value": pooled_p.loc[var1, var2],
+
+        "Sample_Size": pooled_n.loc[var1, var2]
+
+    })
+
+
+pooled_pairwise_summary = pd.DataFrame(
+    pooled_pairwise_records
+)
+
+
+# =====================================================================
+# 24. DATA QUALITY SUMMARY
+# =====================================================================
+
+quality_records = []
+
+for station_name, data in station_data.items():
+
+    station_id = data["Station_ID"].iloc[0]
+
+    for variable in VARIABLES:
+
+        quality_records.append({
+
+            "Station": station_name,
+
+            "Station_ID": station_id,
+
+            "Variable": variable,
+
+            "Total observations": len(data),
+
+            "Valid observations": int(
+                data[variable].notna().sum()
+            ),
+
+            "Missing observations": int(
+                data[variable].isna().sum()
+            ),
+
+            "Minimum": data[variable].min(),
+
+            "Maximum": data[variable].max(),
+
+            "Mean": data[variable].mean(),
+
+            "Standard deviation": data[variable].std()
+
+        })
+
+
+data_quality_summary = pd.DataFrame(
+    quality_records
+)
+
+
+# =====================================================================
+# 25. EXPORT RESULTS TO EXCEL
+# =====================================================================
+
+print("\nExporting Excel workbook...")
+
+with pd.ExcelWriter(
+    EXCEL_OUTPUT,
+    engine="openpyxl"
+) as writer:
+
+    # Pooled matrices
+    pooled_r.to_excel(
+        writer,
+        sheet_name="Pooled_Correlation"
+    )
+
+    pooled_p.to_excel(
+        writer,
+        sheet_name="Pooled_P_Values"
+    )
+
+    pooled_n.to_excel(
+        writer,
+        sheet_name="Pooled_Sample_Size"
+    )
+
+    # Water level summary
+    water_level_correlation.to_excel(
+        writer,
+        sheet_name="22x4_WL_Correlation"
+    )
+
+    water_level_pvalues.to_excel(
+        writer,
+        sheet_name="22x4_WL_P_Values"
+    )
+
+    water_level_samples.to_excel(
+        writer,
+        sheet_name="22x4_WL_Sample_Size"
+    )
+
+    # All 10 pairs
+    pairwise_correlation.to_excel(
+        writer,
+        sheet_name="22x10_Pairwise_Correlation"
+    )
+
+    pooled_pairwise_summary.to_excel(
+        writer,
+        sheet_name="Pooled_10_Pairs",
+        index=False
+    )
+
+    # Detailed station summary
+    station_summary.to_excel(
+        writer,
+        sheet_name="Station_WL_Details",
+        index=False
+    )
+
+    # Data quality
+    data_quality_summary.to_excel(
+        writer,
+        sheet_name="Data_Quality",
+        index=False
+    )
+
+    # Column mapping
+    pd.DataFrame(
+        column_mapping_records
+    ).to_excel(
+        writer,
+        sheet_name="Column_Name_Mapping",
+        index=False
+    )
+
+    # Station-wise matrices
+    for station_name in station_data:
+
+        safe_name = re.sub(
+            r"[\[\]:*?/\\]",
+            "_",
+            station_name
+        )
+
+        safe_name = safe_name[:18]
+
+        station_correlation_results[
+            station_name
+        ].to_excel(
+            writer,
+            sheet_name=f"{safe_name}_R"
+        )
+
+        station_pvalue_results[
+            station_name
+        ].to_excel(
+            writer,
+            sheet_name=f"{safe_name}_P"
+        )
+
+        station_sample_results[
+            station_name
+        ].to_excel(
+            writer,
+            sheet_name=f"{safe_name}_N"
+        )
+
+
+print("Excel workbook saved:", EXCEL_OUTPUT)
+
+
+# =====================================================================
+# 26. SAVE PYTHON SCRIPT
+# =====================================================================
+
+try:
+
+    current_script = Path(__file__).resolve()
+
+    if current_script.exists():
+
+        shutil.copy2(
+            current_script,
+            SCRIPT_OUTPUT
+        )
+
+        print("Python script saved:", SCRIPT_OUTPUT)
+
+except NameError:
+
+    print(
+        "Script copy unavailable in interactive environment."
+    )
+
+
+# =====================================================================
+# 27. CREATE WORD DOCUMENT WITH COMPLETE PYTHON CODE
+# =====================================================================
+
+try:
+
+    current_script = Path(__file__).resolve()
+
+    if current_script.exists():
+
+        with open(
+            current_script,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            complete_code = f.read()
+
+        document = Document()
+
+        document.add_heading(
+            "Complete Pearson Correlation Analysis",
+            level=1
+        )
+
+        document.add_paragraph(
+            "Research: GAT-LSTM Flood Prediction"
+        )
+
+        document.add_paragraph(
+            "Study period: 2000-2025"
+        )
+
+        document.add_paragraph(
+            "Temporal resolution: Daily"
+        )
+
+        document.add_heading(
+            "Complete Python Source Code",
+            level=2
+        )
+
+        paragraph = document.add_paragraph()
+
+        run = paragraph.add_run(
+            complete_code
+        )
+
+        run.font.name = "Consolas"
+
+        run.font.size = Pt(7)
+
+        document.save(
+            WORD_OUTPUT
+        )
+
+        print("Word document saved:", WORD_OUTPUT)
+
+except NameError:
+
+    print(
+        "Word document could not be created automatically "
+        "because __file__ is unavailable."
+    )
+
+
+# =====================================================================
+# 28. FINAL OUTPUT SUMMARY
+# =====================================================================
+
+print("\n" + "=" * 75)
+
+print("PEARSON CORRELATION ANALYSIS COMPLETED")
+
+print("=" * 75)
+
+print("Stations processed:", len(station_data))
+
+print("Variables analyzed:", len(VARIABLES))
+
+print("Study period: 2000-2025")
+
+print("Total pooled records:", len(pooled_data))
+
+print("\nOUTPUT FILES:")
+
+print("Excel:", EXCEL_OUTPUT)
+
+print("Station heatmaps:", HEATMAP_FOLDER)
+
+print("Pooled heatmaps:", POOLED_FOLDER)
+
+print("Summary heatmaps:", SUMMARY_FOLDER)
+
+print("Word code:", WORD_OUTPUT)
+
+print("Python script:", SCRIPT_OUTPUT)
+
+print("\nAnalysis completed successfully.")
+
+print("=" * 75)
